@@ -1,0 +1,125 @@
+variables:
+  DOCKER_DRIVER: overlay
+  CONTAINER_TEST_IMAGE: $CI_REGISTRY_IMAGE:$CI_BUILD_REF_NAME
+  CONTAINER_IMAGE: $CI_REGISTRY_IMAGE
+  CONTAINER_RELEASE_IMAGE: $CI_REGISTRY_IMAGE:latest
+
+cache:
+  key: "$CI_PROJECT_NAME"
+  untracked: false
+  policy: push
+
+stages:
+  - test
+  - build
+  - deploy
+
+before_script:
+  # install ssh-agent
+  - 'which ssh-agent || ( apt-get update -y && apt-get install openssh-client -y )'
+
+  # run ssh-agent
+  - eval $(ssh-agent -s)
+
+  # add ssh key stored in SSH_PRIVATE_KEY variable to the agent store
+  - ssh-add <(echo "$SSH_PRIVATE_KEY")
+
+  # disable host key checking (NOTE: makes you susceptible to man-in-the-middle attacks)
+  # WARNING: use only in docker container, if you use it with shell you will overwrite your user's ssh config
+  - mkdir -p ~/.ssh
+  - echo -e "Host *\n\tStrictHostKeyChecking no\n\n" > ~/.ssh/config
+
+test:service:
+  image: golang:1.10
+  stage: test
+  script:
+    - echo "Testing $CI_PROJECT_NAME"
+    - make test
+  tags:
+    - docker
+  only:
+    - master
+  artifacts:
+    paths:
+    - .build
+
+build:service:
+  image: golang:1.10
+  stage: build
+  script:
+    - echo "Building debug artifact"
+    - make
+  artifacts:
+    paths:
+    - .build/
+    expire_in: 1 week
+  only:
+    - branches   
+
+review:service:
+  image: golang:1.10
+  stage: test
+  script:
+    - echo "Reviewing $CI_PROJECT_NAME" 
+    - make test
+  only:
+    - branches
+  except: 
+    - master
+
+build:container:
+  image: docker:latest
+  stage: deploy
+  services:
+    - docker:dind
+  before_script:
+    - echo -n $CI_BUILD_TOKEN | docker login -u gitlab-ci-token --password-stdin registry.gitlab.com
+  script:
+    - docker build --pull -t $CONTAINER_TEST_IMAGE -f Dockerfile .
+    - docker tag $CONTAINER_TEST_IMAGE $CONTAINER_IMAGE:latest
+    - docker push $CONTAINER_IMAGE:latest
+  when: manual
+  tags:
+    - docker
+  only:
+    - release
+  dependencies:
+    - build:service
+
+tag:container:
+  image: docker:latest
+  stage: deploy
+  services:
+    - docker:dind
+  before_script:
+    - echo -n $CI_BUILD_TOKEN | docker login -u gitlab-ci-token --password-stdin registry.gitlab.com
+  script:
+    - docker build --pull -t $CONTAINER_TEST_IMAGE -f Dockerfile .
+    - docker tag $CONTAINER_TEST_IMAGE $CONTAINER_IMAGE:$CI_BUILD_REF_NAME
+    - docker push $CONTAINER_IMAGE:$CI_BUILD_REF_NAME
+  when: on_success
+  tags:
+    - docker
+  only:
+    - tags
+  dependencies:
+    - build:service
+
+nightly:container:
+  image: docker:latest
+  stage: deploy
+  services:
+    - docker:dind
+  before_script:
+    - echo -n $CI_BUILD_TOKEN | docker login -u gitlab-ci-token --password-stdin registry.gitlab.com
+  script:
+    - docker build --pull -t $CONTAINER_TEST_IMAGE -f Dockerfile .
+    - docker tag $CONTAINER_TEST_IMAGE $CONTAINER_IMAGE:nightly
+    - docker push $CONTAINER_IMAGE:nightly
+  when: on_success
+  tags:
+    - docker
+  only:
+    - schedules
+  dependencies:
+    - build:service
